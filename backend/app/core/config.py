@@ -12,8 +12,14 @@ class Settings(BaseSettings):
     processed_root: Path = Path("outputs")
     annotated_videos_dir: str = "videos"
     reports_dir: str = "reports"
+    snapshots_dir: str = "snapshots"
     frame_sample_rate: int = 1  # process every frame by default
-    face_match_threshold: float = 0.45
+    face_match_threshold: float = 0.5
+    face_detection_model: str = "cnn"  # 'hog' (faster) or 'cnn' (more accurate)
+    face_detection_upsample: int = 2
+    min_face_area_ratio: float = 0.0008  # relative to frame area
+    output_video_scale: float = 0.7
+    snapshot_image_format: str = "jpg"
     known_faces_collection: str = "people"
     videos_collection: str = "videos"
     detections_collection: str = "detections"
@@ -26,6 +32,7 @@ class Settings(BaseSettings):
         (self.media_root).mkdir(parents=True, exist_ok=True)
         (self.processed_root / self.annotated_videos_dir).mkdir(parents=True, exist_ok=True)
         (self.processed_root / self.reports_dir).mkdir(parents=True, exist_ok=True)
+        (self.processed_root / self.snapshots_dir).mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()

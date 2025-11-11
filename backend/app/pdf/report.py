@@ -5,7 +5,7 @@ from typing import Any, Dict
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 
 def build_report(video_metadata: Dict[str, Any], output_path: Path) -> Path:
@@ -46,12 +46,29 @@ def build_report(video_metadata: Dict[str, Any], output_path: Path) -> Path:
         story.append(Paragraph(header, styles["Heading3"]))
         story.append(Spacer(1, 6))
 
-        detail_rows = [["Timestamp (s)", "Frame Index", "Bounding Box (top, right, bottom, left)"]]
+        detail_rows = [["Snapshot", "Timestamp (s)", "Frame Index", "Bounding Box (top, right, bottom, left)"]]
         for detail in person.get("details", []):
             bbox = ", ".join(str(v) for v in detail.get("bounding_box", []))
-            detail_rows.append([str(detail.get("timestamp", "")), str(detail.get("frame_index", "")), bbox])
+            snapshot = detail.get("snapshot_path")
+            if snapshot:
+                snapshot_file = Path(snapshot)
+                if snapshot_file.exists():
+                    img = Image(str(snapshot_file), width=60, height=60, mask="auto")
+                    img._restrictSize(60, 60)
+                else:
+                    img = "N/A"
+            else:
+                img = "N/A"
+            detail_rows.append(
+                [
+                    img,
+                    str(detail.get("timestamp", "")),
+                    str(detail.get("frame_index", "")),
+                    bbox,
+                ]
+            )
 
-        table = Table(detail_rows, hAlign="LEFT")
+        table = Table(detail_rows, hAlign="LEFT", colWidths=[70, 70, 60, 220])
         table.setStyle(
             TableStyle(
                 [
@@ -59,7 +76,8 @@ def build_report(video_metadata: Dict[str, Any], output_path: Path) -> Path:
                     ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
                     ("GRID", (0, 0), (-1, -1), 0.25, colors.darkgrey),
                     ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 9),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+                    ("VALIGN", (0, 1), (0, -1), "MIDDLE"),
                 ]
             )
         )

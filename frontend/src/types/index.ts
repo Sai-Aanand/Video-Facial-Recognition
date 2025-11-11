@@ -2,6 +2,7 @@ export interface AppearanceDetail {
   timestamp: number;
   frame_index: number;
   bounding_box: number[];
+  snapshot_path?: string | null;
 }
 
 export interface PersonSummary {

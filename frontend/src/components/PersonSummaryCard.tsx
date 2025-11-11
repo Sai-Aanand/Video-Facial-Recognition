@@ -24,7 +24,7 @@ export default function PersonSummaryCard({ person }: Props) {
             <tr key={`${person.person_id}-${index}`}>
               <td>{detail.timestamp.toFixed(2)}</td>
               <td>{detail.frame_index}</td>
-              <td>{detail.bounding_box.join(', ')}</td>
+              <td>{detail.bounding_box ? detail.bounding_box.join(', ') : '—'}</td>
             </tr>
           ))}
         </tbody>

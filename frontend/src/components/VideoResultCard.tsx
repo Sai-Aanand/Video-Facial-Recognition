@@ -1,5 +1,4 @@
 import type { VideoRecord } from '../types';
-import PersonSummaryCard from './PersonSummaryCard';
 
 interface Props {
   video: VideoRecord;
@@ -70,18 +69,16 @@ export default function VideoResultCard({ video }: Props) {
         )}
       </div>
 
+      <p style={{ marginTop: 16, color: '#475569' }}>
+        Detailed detection logs, timestamps, and snapshots are available exclusively inside the downloadable PDF
+        report.
+      </p>
+
       {video.status === 'failed' && (
         <div className="error-text" style={{ marginTop: 12 }}>
           Processing failed. Check the backend logs for details.
         </div>
       )}
-
-      <div style={{ marginTop: 24, display: 'grid', gap: 16 }}>
-        {summary.per_person.map((person) => (
-          <PersonSummaryCard key={person.person_id} person={person} />
-        ))}
-        {summary.per_person.length === 0 && <small>No faces detected.</small>}
-      </div>
     </div>
   );
 }

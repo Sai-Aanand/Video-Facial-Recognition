@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 import time
+import uuid
 
 import cv2
 import face_recognition
@@ -36,6 +37,8 @@ class VideoProcessor:
         self.known_encodings: List[np.ndarray] = []
         self.known_ids: List[str] = []
         self.known_names: List[str] = []
+        self.snapshot_root = settings.processed_root / settings.snapshots_dir / self.video_id
+        self.snapshot_root.mkdir(parents=True, exist_ok=True)
 
     async def load_known_faces(self) -> None:
         cursor = self.people_collection.find({})
@@ -117,6 +120,62 @@ class VideoProcessor:
             },
         )
 
+    def _save_snapshot(self, frame: np.ndarray, bbox: Tuple[int, int, int, int], person_id: str, frame_index: int) -> Path | None:
+        top, right, bottom, left = bbox
+        margin = 12
+        height, width, _ = frame.shape
+        top = max(0, top - margin)
+        left = max(0, left - margin)
+        bottom = min(height, bottom + margin)
+        right = min(width, right + margin)
+
+        if bottom <= top or right <= left:
+            return None
+
+        crop = frame[top:bottom, left:right]
+        if crop.size == 0:
+            return None
+
+        person_dir = self.snapshot_root / person_id
+        person_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{frame_index}_{uuid.uuid4().hex[:8]}.{settings.snapshot_image_format}"
+        snapshot_path = person_dir / filename
+        cv2.imwrite(str(snapshot_path), crop)
+        return snapshot_path
+
+    def _filter_locations(self, locations: List[Tuple[int, int, int, int]], frame_shape: Tuple[int, int, int]) -> List[Tuple[int, int, int, int]]:
+        if not locations:
+            return []
+
+        height, width = frame_shape[0], frame_shape[1]
+        min_area = settings.min_face_area_ratio * (width * height)
+        filtered: List[Tuple[int, int, int, int]] = []
+
+        for (top, right, bottom, left) in locations:
+            box_width = right - left
+            box_height = bottom - top
+            if box_width <= 0 or box_height <= 0:
+                continue
+
+            area = box_width * box_height
+            if area < min_area:
+                continue
+
+            aspect_ratio = box_width / box_height
+            if not (0.55 <= aspect_ratio <= 1.9):
+                continue
+
+            filtered.append(
+                (
+                    int(max(0, top)),
+                    int(min(width, right)),
+                    int(min(height, bottom)),
+                    int(max(0, left)),
+                )
+            )
+
+        return filtered
+
     async def process(self, filepath: Path) -> Dict[str, Any]:
         await self.load_known_faces()
 
@@ -131,10 +190,14 @@ class VideoProcessor:
 
         start_time = time.perf_counter()
 
+        scale = max(0.2, min(1.0, settings.output_video_scale))
+        output_width = max(1, int(frame_width * scale))
+        output_height = max(1, int(frame_height * scale))
+
         annotated_dir = settings.processed_root / settings.annotated_videos_dir
         annotated_path = annotated_dir / f"{self.video_id}.mp4"
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(annotated_path), fourcc, fps, (frame_width, frame_height))
+        writer = cv2.VideoWriter(str(annotated_path), fourcc, fps, (output_width, output_height))
 
         summary: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"name": "", "appearances": 0, "details": []})
         detection_documents: List[Dict[str, Any]] = []
@@ -148,8 +211,14 @@ class VideoProcessor:
                     break
 
                 timestamp = frame_index / fps if fps else 0.0
+                frame_for_snapshot = frame.copy()
                 rgb_frame = np.ascontiguousarray(frame[:, :, ::-1])
-                locations = face_recognition.face_locations(rgb_frame)
+                locations = face_recognition.face_locations(
+                    rgb_frame,
+                    number_of_times_to_upsample=settings.face_detection_upsample,
+                    model=settings.face_detection_model,
+                )
+                locations = self._filter_locations(locations, frame.shape)
 
                 if locations:
                     recognitions = await self.recognise_faces(rgb_frame, locations)
@@ -160,6 +229,9 @@ class VideoProcessor:
                     top, right, bottom, left = recognition.bounding_box
                     recognition.timestamp = timestamp
                     recognition.frame_index = frame_index
+
+                    snapshot_path = self._save_snapshot(frame_for_snapshot, recognition.bounding_box, recognition.person_id, frame_index)
+                    snapshot_str = str(snapshot_path) if snapshot_path else None
 
                     cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
                     cv2.putText(
@@ -180,6 +252,7 @@ class VideoProcessor:
                             "timestamp": round(recognition.timestamp, 2),
                             "frame_index": recognition.frame_index,
                             "bounding_box": [top, right, bottom, left],
+                            "snapshot_path": snapshot_str,
                         }
                     )
 
@@ -191,11 +264,16 @@ class VideoProcessor:
                             "timestamp": recognition.timestamp,
                             "frame_index": recognition.frame_index,
                             "bounding_box": [top, right, bottom, left],
+                            "snapshot_path": snapshot_str,
                             "created_at": datetime.utcnow(),
                         }
                     )
 
-                writer.write(frame)
+                annotated_frame = cv2.resize(
+                    frame,
+                    (int(frame_width * settings.output_video_scale), int(frame_height * settings.output_video_scale)),
+                )
+                writer.write(annotated_frame)
                 frame_index += 1
 
                 processed_frames = frame_index

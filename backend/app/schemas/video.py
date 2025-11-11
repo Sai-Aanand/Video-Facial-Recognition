@@ -14,6 +14,7 @@ class AppearanceDetail(BaseModel):
     timestamp: float
     frame_index: int
     bounding_box: List[int]
+    snapshot_path: Optional[str] = None
 
 
 class PersonSummary(BaseModel):
