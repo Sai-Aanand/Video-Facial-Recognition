@@ -3,6 +3,7 @@ export interface AppearanceDetail {
   frame_index: number;
   bounding_box: number[];
   snapshot_path?: string | null;
+  confidence?: number | null;
 }
 
 export interface PersonSummary {

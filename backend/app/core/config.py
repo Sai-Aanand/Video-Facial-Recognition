@@ -13,13 +13,11 @@ class Settings(BaseSettings):
     annotated_videos_dir: str = "videos"
     reports_dir: str = "reports"
     snapshots_dir: str = "snapshots"
-    frame_sample_rate: int = 1  # process every frame by default
-    face_match_threshold: float = 0.5
-    face_detection_model: str = "cnn"  # 'hog' (faster) or 'cnn' (more accurate)
-    face_detection_upsample: int = 2
-    min_face_area_ratio: float = 0.0008  # relative to frame area
+    frame_sample_rate: int = 1  # reserved for future subsampling
     output_video_scale: float = 0.7
     snapshot_image_format: str = "jpg"
+    yolo_model_path: str = "yolov8n.pt"
+    detection_confidence: float = 0.35
     known_faces_collection: str = "people"
     videos_collection: str = "videos"
     detections_collection: str = "detections"

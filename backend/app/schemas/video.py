@@ -15,6 +15,7 @@ class AppearanceDetail(BaseModel):
     frame_index: int
     bounding_box: List[int]
     snapshot_path: Optional[str] = None
+    confidence: Optional[float] = None
 
 
 class PersonSummary(BaseModel):

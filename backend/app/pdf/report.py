@@ -46,7 +46,7 @@ def build_report(video_metadata: Dict[str, Any], output_path: Path) -> Path:
         story.append(Paragraph(header, styles["Heading3"]))
         story.append(Spacer(1, 6))
 
-        detail_rows = [["Snapshot", "Timestamp (s)", "Frame Index", "Bounding Box (top, right, bottom, left)"]]
+        detail_rows = [["Snapshot", "Timestamp (s)", "Frame Index", "Confidence", "Bounding Box (top, right, bottom, left)"]]
         for detail in person.get("details", []):
             bbox = ", ".join(str(v) for v in detail.get("bounding_box", []))
             snapshot = detail.get("snapshot_path")
@@ -64,11 +64,12 @@ def build_report(video_metadata: Dict[str, Any], output_path: Path) -> Path:
                     img,
                     str(detail.get("timestamp", "")),
                     str(detail.get("frame_index", "")),
+                    str(detail.get("confidence", "")),
                     bbox,
                 ]
             )
 
-        table = Table(detail_rows, hAlign="LEFT", colWidths=[70, 70, 60, 220])
+        table = Table(detail_rows, hAlign="LEFT", colWidths=[70, 70, 60, 60, 200])
         table.setStyle(
             TableStyle(
                 [

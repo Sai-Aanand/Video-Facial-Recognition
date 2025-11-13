@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -9,103 +8,34 @@ import time
 import uuid
 
 import cv2
-import face_recognition
 import numpy as np
+import supervision as sv
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pymongo import ReturnDocument
+from ultralytics import YOLO
 
 from ..core.config import settings
 
 
-@dataclass(slots=True)
-class RecognitionResult:
-    person_id: str
-    name: str
-    bounding_box: Tuple[int, int, int, int]
-    timestamp: float
-    frame_index: int
-
-
 class VideoProcessor:
+    _detector: YOLO | None = None
+
     def __init__(self, db: AsyncIOMotorDatabase, video_id: str, filename: str) -> None:
         self.db = db
         self.video_id = video_id
         self.filename = filename
-        self.people_collection = db[settings.known_faces_collection]
         self.videos_collection = db[settings.videos_collection]
         self.detections_collection = db[settings.detections_collection]
-        self.known_encodings: List[np.ndarray] = []
-        self.known_ids: List[str] = []
-        self.known_names: List[str] = []
         self.snapshot_root = settings.processed_root / settings.snapshots_dir / self.video_id
         self.snapshot_root.mkdir(parents=True, exist_ok=True)
+        self.detector = self._load_detector()
+        self.tracker = sv.ByteTrack()
 
-    async def load_known_faces(self) -> None:
-        cursor = self.people_collection.find({})
-        async for person in cursor:
-            for enc in person.get("encodings", []):
-                self.known_encodings.append(np.array(enc))
-                self.known_ids.append(str(person["_id"]))
-                self.known_names.append(person["name"])
-
-    async def _create_person(self, encoding: np.ndarray) -> Tuple[str, str]:
-        auto_name = f"Person {len(self.known_ids) + 1}"
-        document = {
-            "name": auto_name,
-            "encodings": [encoding.tolist()],
-            "metadata": {"auto_generated": True},
-            "created_at": datetime.utcnow(),
-        }
-        result = await self.people_collection.insert_one(document)
-        person_id = str(result.inserted_id)
-
-        self.known_encodings.append(encoding)
-        self.known_ids.append(person_id)
-        self.known_names.append(auto_name)
-        return person_id, auto_name
-
-    async def recognise_faces(self, rgb_frame: np.ndarray, locations: List[Tuple[int, int, int, int]]) -> List[RecognitionResult]:
-        encodings = face_recognition.face_encodings(rgb_frame, locations)
-        results: List[RecognitionResult] = []
-        for idx, encoding in enumerate(encodings):
-            if self.known_encodings:
-                distances = face_recognition.face_distance(self.known_encodings, encoding)
-                best_idx = int(np.argmin(distances))
-                best_distance = distances[best_idx]
-            else:
-                best_idx = -1
-                best_distance = 1.0
-
-            if best_distance < settings.face_match_threshold and best_idx >= 0:
-                person_id = self.known_ids[best_idx]
-                name = self.known_names[best_idx]
-                await self._augment_person_encoding(best_idx, encoding)
-            else:
-                person_id, name = await self._create_person(encoding)
-
-            results.append(
-                RecognitionResult(
-                    person_id=person_id,
-                    name=name,
-                    bounding_box=locations[idx],
-                    timestamp=0.0,  # placeholder, set by caller
-                    frame_index=0,
-                )
-            )
-        return results
-
-    async def _augment_person_encoding(self, index: int, encoding: np.ndarray) -> None:
-        person_id = self.known_ids[index]
-        updated = await self.people_collection.find_one_and_update(
-            {"_id": self._to_object_id(person_id)},
-            {"$push": {"encodings": encoding.tolist()}},
-            return_document=ReturnDocument.AFTER,
-        )
-        if updated is not None:
-            # store the new encoding for future comparisons
-            self.known_encodings.append(np.array(updated["encodings"][-1]))
-            self.known_ids.append(person_id)
-            self.known_names.append(updated["name"])
+    @classmethod
+    def _load_detector(cls) -> YOLO:
+        if cls._detector is None:
+            weights = getattr(settings, "yolo_model_path", "yolov8n.pt")
+            cls._detector = YOLO(weights)
+        return cls._detector
 
     async def _update_progress(self, processed_frames: int, total_frames: int, progress_percent: float) -> None:
         await self.videos_collection.update_one(
@@ -120,9 +50,9 @@ class VideoProcessor:
             },
         )
 
-    def _save_snapshot(self, frame: np.ndarray, bbox: Tuple[int, int, int, int], person_id: str, frame_index: int) -> Path | None:
+    def _save_snapshot(self, frame: np.ndarray, bbox: Tuple[int, int, int, int], tracker_label: str, frame_index: int) -> Path | None:
         top, right, bottom, left = bbox
-        margin = 12
+        margin = 5
         height, width, _ = frame.shape
         top = max(0, top - margin)
         left = max(0, left - margin)
@@ -136,49 +66,14 @@ class VideoProcessor:
         if crop.size == 0:
             return None
 
-        person_dir = self.snapshot_root / person_id
+        person_dir = self.snapshot_root / tracker_label
         person_dir.mkdir(parents=True, exist_ok=True)
         filename = f"{frame_index}_{uuid.uuid4().hex[:8]}.{settings.snapshot_image_format}"
         snapshot_path = person_dir / filename
         cv2.imwrite(str(snapshot_path), crop)
         return snapshot_path
 
-    def _filter_locations(self, locations: List[Tuple[int, int, int, int]], frame_shape: Tuple[int, int, int]) -> List[Tuple[int, int, int, int]]:
-        if not locations:
-            return []
-
-        height, width = frame_shape[0], frame_shape[1]
-        min_area = settings.min_face_area_ratio * (width * height)
-        filtered: List[Tuple[int, int, int, int]] = []
-
-        for (top, right, bottom, left) in locations:
-            box_width = right - left
-            box_height = bottom - top
-            if box_width <= 0 or box_height <= 0:
-                continue
-
-            area = box_width * box_height
-            if area < min_area:
-                continue
-
-            aspect_ratio = box_width / box_height
-            if not (0.55 <= aspect_ratio <= 1.9):
-                continue
-
-            filtered.append(
-                (
-                    int(max(0, top)),
-                    int(min(width, right)),
-                    int(min(height, bottom)),
-                    int(max(0, left)),
-                )
-            )
-
-        return filtered
-
     async def process(self, filepath: Path) -> Dict[str, Any]:
-        await self.load_known_faces()
-
         capture = cv2.VideoCapture(str(filepath))
         if not capture.isOpened():
             raise RuntimeError(f"Could not open video {filepath}")
@@ -211,47 +106,48 @@ class VideoProcessor:
                     break
 
                 timestamp = frame_index / fps if fps else 0.0
-                frame_for_snapshot = frame.copy()
-                rgb_frame = np.ascontiguousarray(frame[:, :, ::-1])
-                locations = face_recognition.face_locations(
-                    rgb_frame,
-                    number_of_times_to_upsample=settings.face_detection_upsample,
-                    model=settings.face_detection_model,
-                )
-                locations = self._filter_locations(locations, frame.shape)
 
-                if locations:
-                    recognitions = await self.recognise_faces(rgb_frame, locations)
-                else:
-                    recognitions = []
+                results = self.detector(
+                    frame,
+                    conf=getattr(settings, "detection_confidence", 0.35),
+                    classes=[0],
+                    verbose=False,
+                )[0]
+                detections = sv.Detections.from_ultralytics(results)
+                tracked = self.tracker.update_with_detections(detections)
 
-                for recognition in recognitions:
-                    top, right, bottom, left = recognition.bounding_box
-                    recognition.timestamp = timestamp
-                    recognition.frame_index = frame_index
+                for xyxy, tracker_id, confidence in zip(tracked.xyxy, tracked.tracker_id, tracked.confidence):
+                    if tracker_id is None:
+                        continue
 
-                    snapshot_path = self._save_snapshot(frame_for_snapshot, recognition.bounding_box, recognition.person_id, frame_index)
+                    x1, y1, x2, y2 = xyxy.astype(int)
+                    bbox = (int(y1), int(x2), int(y2), int(x1))  # top, right, bottom, left
+                    label = f"Person {int(tracker_id)}"
+                    person_key = str(int(tracker_id))
+
+                    snapshot_path = self._save_snapshot(frame, bbox, person_key, frame_index)
                     snapshot_str = str(snapshot_path) if snapshot_path else None
 
-                    cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.putText(
                         frame,
-                        recognition.name,
-                        (left, top - 10),
+                        label,
+                        (x1, max(0, y1 - 10)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.5,
                         (0, 255, 0),
                         1,
                     )
 
-                    person_summary = summary[recognition.person_id]
-                    person_summary["name"] = recognition.name
+                    person_summary = summary[person_key]
+                    person_summary["name"] = label
                     person_summary["appearances"] += 1
                     person_summary["details"].append(
                         {
-                            "timestamp": round(recognition.timestamp, 2),
-                            "frame_index": recognition.frame_index,
-                            "bounding_box": [top, right, bottom, left],
+                            "timestamp": round(timestamp, 2),
+                            "frame_index": frame_index,
+                            "bounding_box": [int(y1), int(x2), int(y2), int(x1)],
+                            "confidence": round(float(confidence or 0), 3),
                             "snapshot_path": snapshot_str,
                         }
                     )
@@ -259,43 +155,35 @@ class VideoProcessor:
                     detection_documents.append(
                         {
                             "video_id": self.video_id,
-                            "person_id": recognition.person_id,
-                            "person_name": recognition.name,
-                            "timestamp": recognition.timestamp,
-                            "frame_index": recognition.frame_index,
-                            "bounding_box": [top, right, bottom, left],
+                            "person_id": person_key,
+                            "person_name": label,
+                            "timestamp": timestamp,
+                            "frame_index": frame_index,
+                            "bounding_box": [int(y1), int(x2), int(y2), int(x1)],
+                            "confidence": float(confidence or 0),
                             "snapshot_path": snapshot_str,
                             "created_at": datetime.utcnow(),
                         }
                     )
 
-                annotated_frame = cv2.resize(
-                    frame,
-                    (int(frame_width * settings.output_video_scale), int(frame_height * settings.output_video_scale)),
-                )
+                annotated_frame = cv2.resize(frame, (output_width, output_height))
                 writer.write(annotated_frame)
                 frame_index += 1
 
                 processed_frames = frame_index
-                if total_frames > 0:
-                    progress_percent = min(100.0, (processed_frames / total_frames) * 100)
-                else:
-                    progress_percent = 0.0
+                progress_percent = min(100.0, (processed_frames / total_frames) * 100) if total_frames else 0.0
 
-                if (
-                    processed_frames == total_frames
-                    or processed_frames % progress_update_interval == 0
-                ):
+                if processed_frames == total_frames or processed_frames % progress_update_interval == 0:
                     await self._update_progress(processed_frames, total_frames, progress_percent)
         finally:
             capture.release()
             writer.release()
 
-        total_faces = sum(value["appearances"] for value in summary.values())
+        total_people = sum(value["appearances"] for value in summary.values())
         unique_people = len(summary)
         processing_time_seconds = time.perf_counter() - start_time
         summary_payload = {
-            "total_faces": total_faces,
+            "total_faces": total_people,
             "unique_people": unique_people,
             "per_person": [
                 {
@@ -319,7 +207,7 @@ class VideoProcessor:
                     "summary": summary_payload,
                     "total_frames": total_frames,
                     "fps": fps,
-                    "status": "processing",
+                    "status": "processed",
                     "processing_time_seconds": processing_time_seconds,
                     "processing_progress": 100.0,
                     "processed_frames": frame_index,
